@@ -9,17 +9,6 @@ import asyncio
 import logging
 import sys
 
-# Playwright may emit TargetClosedError during Ctrl+C shutdown.
-try:
-    from playwright._impl._errors import TargetClosedError  # type: ignore
-except Exception:  # pragma: no cover
-    TargetClosedError = None  # type: ignore
-
-try:
-    from playwright.async_api import Error as PlaywrightError
-except Exception:  # pragma: no cover
-    PlaywrightError = Exception  # type: ignore
-
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -46,42 +35,6 @@ async def main() -> None:
     )
 
     dp = Dispatcher(storage=MemoryStorage())
-
-    # --- Suppress the noisy asyncio log emitted by Future.__del__ during Playwright shutdown.
-    # That message bypasses the loop exception handler and is harmless in our Ctrl+C shutdown path.
-    class _SuppressAsyncioPlaywrightShutdown(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            if record.name != "asyncio":
-                return True
-            msg = record.getMessage()
-            if "Future exception was never retrieved" not in msg:
-                return True
-            exc = None
-            if record.exc_info and len(record.exc_info) >= 2:
-                exc = record.exc_info[1]
-            if exc is None:
-                return True
-            s = str(exc)
-            if "Target page, context or browser has been closed" in s:
-                return False
-            return True
-
-    logging.getLogger("asyncio").addFilter(_SuppressAsyncioPlaywrightShutdown())
-
-    # Suppress noisy Playwright shutdown errors (Ctrl+C).
-    loop = asyncio.get_running_loop()
-
-    def _loop_exc_handler(loop, context):
-        exc = context.get('exception')
-        if exc is not None:
-            if TargetClosedError is not None and isinstance(exc, TargetClosedError):
-                return
-            # Fallback: match by message (Playwright's error types vary by version)
-            if isinstance(exc, PlaywrightError) and 'Target page, context or browser has been closed' in str(exc):
-                return
-        loop.default_exception_handler(context)
-
-    loop.set_exception_handler(_loop_exc_handler)
 
     # Routers
     dp.include_router(registration.router)
