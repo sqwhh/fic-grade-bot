@@ -1,0 +1,14 @@
+version: "1.0"
+
+services:
+  fic-grades-bot:
+    build: .
+    container_name: fic-bot
+    restart: always
+    env_file:
+      - .env.docker
+    volumes:
+      - fic_grades_data:/data
+
+volumes:
+  fic_grades_data:
