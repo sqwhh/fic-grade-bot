@@ -1,4 +1,4 @@
-# fic-grade-bot 🤖📚
+# FIC final grades telegram bot 📚
 
 A Telegram bot that logs into the **Fraser International College (FIC)** student portal and:
 
