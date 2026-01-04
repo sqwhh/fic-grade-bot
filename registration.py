@@ -1,5 +1,6 @@
 # registration.py
 from aiogram import Router, F, Bot
+from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -19,6 +20,32 @@ router = Router()
 class Creds(StatesGroup):
     waiting_login = State()
     waiting_password = State()
+
+@router.message(Creds.waiting_login, Command("start"))
+@router.message(Creds.waiting_password, Command("start"))
+async def cancel_creds_flow(message: Message, state: FSMContext):
+    await state.clear()
+
+    uid = message.from_user.id
+    rec = await db.get_user(uid)
+
+    if rec:
+        fic_st = await db.get_fic_state(uid)
+        await message.answer(
+            "✅ Cancelled.\n\n"
+            "🏠 <b>Main menu</b>\n"
+            f"<b>FIC:</b> {'on 🔔' if rec.get('fic_active') else 'off 🔕'} | "
+            f"Update: {format_dt_vancouver((fic_st or {}).get('updated_at'))}\n\n"
+            "<b>Choose a section:</b>",
+            reply_markup=keyboards.kb_main_menu(),
+        )
+    else:
+        await message.answer(
+            "✅ Cancelled.\n\n"
+            "👋 <b>Hello!</b> I monitor your FIC final grades and alert you to changes.\n\n"
+            "To begin, please register. First send your login, then your password.",
+            reply_markup=keyboards.kb_start_new_user(),
+        )
 
 
 @router.callback_query(F.data == "reg:start")
