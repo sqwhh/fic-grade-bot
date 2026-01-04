@@ -3,14 +3,6 @@
 
 This project uses a **flat module layout** (no `services.*` / `handlers.*`
 packages) to make Docker deployment and imports straightforward.
-
-Included:
-- FIC final grades monitoring + notifications
-- Manual grades view + GPA calculation
-
-Removed:
-- Moodle grade checker
-- Enrollment checker
 """
 
 import asyncio
