@@ -3,10 +3,20 @@
 
 Only FIC grades + GPA logic is kept.
 (Moodle and Enrollment message logic was removed.)
+
+GPA / repeat logic implemented here follows SFU's Spring 2026 calendar:
+  - Only grades with a numerical equivalent are included in GPA.
+  - F / FD / N count as 0.00 and do affect GPA.
+  - P / W and transcript notations (AE/AU/CC/CF/CN/CR/FX/WD/WE) have
+    no numerical equivalent and are excluded from GPA.
+  - Temporary grades (DE/GN/IP) have no numerical equivalent and are excluded.
+  - When a course is repeated, only the highest grade counts; if the same grade
+    is earned, the most recent attempt is counted and earlier attempt(s) are excluded.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Tuple
 
 from utils import parse_snapshot
@@ -15,6 +25,11 @@ from utils import parse_snapshot
 # ====== Course Credits & GPA Data ======
 
 def get_course_credits(course_code: str) -> int:
+    """Return the unit/credit value for a course code.
+
+    Unknown courses default to 0 (won't affect GPA). If you want every course to
+    count correctly, keep this mapping up to date.
+    """
     courses = {
         'ALC099': 0, 'ALC101': 0, 'ARCH100': 3, 'ARCH131': 3,
         'BISC100': 4, 'BISC101': 4, 'BISC102': 4, 'BPK140': 3,
@@ -46,22 +61,101 @@ def get_course_credits(course_code: str) -> int:
     return courses.get(course_code, 0)
 
 
-GRADE_POINTS = {
+# SFU standard numeric equivalents (Spring 2026).
+GRADE_POINTS: Dict[str, float] = {
     "A+": 4.33,
-    "A": 4.0,
+    "A": 4.00,
     "A-": 3.67,
     "B+": 3.33,
-    "B": 3.0,
+    "B": 3.00,
     "B-": 2.67,
     "C+": 2.33,
-    "C": 2.0,
+    "C": 2.00,
     "C-": 1.67,
-    "D": 1.0,
+    "D": 1.00,
+    "F": 0.00,
+    "FD": 0.00,
+    "N": 0.00,
+}
+
+# Grades / notations without a numerical equivalent (excluded from GPA).
+NON_GPA_GRADES = {
+    # Competency / Practicum
+    "P", "W",
+    # Student Records and Transcript Notations
+    "AE", "AU", "CC", "CF", "CN", "CR", "FX", "WD", "WE",
+    # Temporary grades
+    "DE", "GN", "IP",
 }
 
 
-def grade_to_points(grade: str) -> float:
-    return GRADE_POINTS.get(grade.strip(), 0.0) if grade else 0.0
+def _norm_course_code(code: str) -> str:
+    """Normalize course codes to a stable comparison key."""
+    if not code:
+        return ""
+    # Keep only letters/numbers, remove spaces and punctuation.
+    return re.sub(r"[^A-Z0-9]", "", code.upper().strip())
+
+
+def _norm_grade(grade: str) -> str:
+    """Normalize grade strings from portals.
+
+    Examples handled:
+      "A-" / "A −" (unicode minus) / "a-" -> "A-"
+      "B+ (78%)" -> "B+"
+      " wd " -> "WD"
+    """
+    if not grade:
+        return ""
+
+    g = grade.strip().upper()
+    g = g.replace("−", "-")  # unicode minus
+
+    # Keep first token before whitespace or punctuation.
+    g = re.split(r"[\s(),;]+", g)[0].strip()
+    return g
+
+
+def grade_to_points(grade: str) -> Optional[float]:
+    """Return numeric equivalent for a grade, or None if excluded from GPA."""
+    g = _norm_grade(grade)
+    if not g:
+        return None
+    if g in NON_GPA_GRADES:
+        return None
+    return GRADE_POINTS.get(g)
+
+
+_TERM_ORDER = {
+    "WINTER": 0,
+    "SPRING": 1,
+    "SUMMER": 2,
+    "FALL": 3,
+}
+
+
+def _term_sort_key(term_label: str) -> tuple:
+    """Best-effort chronological sort for term labels.
+
+    Supports labels like:
+      - "Spring 2026"
+      - "2026 Spring"
+      - "FALL 2025 (FIC)"
+    """
+    s = (term_label or "").upper()
+
+    # Find a year anywhere in the label.
+    m = re.search(r"(19|20)\d{2}", s)
+    year = int(m.group(0)) if m else 0
+
+    term_rank = 99
+    for name, rank in _TERM_ORDER.items():
+        if name in s:
+            term_rank = rank
+            break
+
+    # Fallback: sort unknown labels last but deterministically.
+    return (year, term_rank, s)
 
 
 # ====== FIC Message Formatting ======
@@ -71,12 +165,12 @@ def format_grades_compact(grades_map: Dict[str, Dict[str, str]]) -> str:
         return "No saved grades yet. Press “Force refresh” to fetch."
 
     lines: List[str] = []
-    sems = sorted(grades_map.keys())
+    sems = sorted(grades_map.keys(), key=_term_sort_key)
     for i, sem in enumerate(sems):
         lines.append(f"🗓 <b>{sem}</b>")
         inner = grades_map.get(sem) or {}
         for code, grade in sorted(inner.items()):
-            g = grade if grade else "—"
+            g = (grade or "").strip() or "—"
             lines.append(f"  • {code}: {g}")
         if i < len(sems) - 1:
             lines.append("")
@@ -84,49 +178,113 @@ def format_grades_compact(grades_map: Dict[str, Dict[str, str]]) -> str:
 
 
 def format_gpa_report_compact(grades_map: Dict[str, Dict[str, str]]) -> str:
+    """Compute GPA using SFU numeric equivalents and repeat exclusion."""
     if not grades_map:
         return "No graded courses yet."
 
-    lines = ["📊 GPA Calculation"]
+    lines: List[str] = [
+        "<b>📊 GPA Calculation</b>",
+        "Legend: ",
+        " • ✅ counted ",
+        " • 🚫 excluded (repeat) ",
+        " • ⏭ not in GPA",
+    ]
 
-    total_best_points = 0.0
-    total_best_credits = 0
+    sems = sorted(grades_map.keys(), key=_term_sort_key)
 
-    best_pts_by_code: Dict[str, float] = {}
-    credits_by_code: Dict[str, int] = {}
+    # ---- Flatten attempts in chronological order ----
+    # attempt_key provides a stable “most recent” ordering.
+    attempts: List[dict] = []
+    for sem_index, sem in enumerate(sems):
+        inner = grades_map.get(sem) or {}
+        # stable ordering inside term
+        for pos, (code_raw, grade_raw) in enumerate(sorted(inner.items(), key=lambda x: x[0])):
+            code_norm = _norm_course_code(code_raw)
+            cr = get_course_credits(code_norm)
+            pt = grade_to_points(grade_raw)
+            attempts.append({
+                "sem": sem,
+                "sem_index": sem_index,
+                "pos": pos,
+                "attempt_key": (sem_index, pos),
+                "code_raw": code_raw,
+                "code_norm": code_norm,
+                "grade_raw": (grade_raw or "").strip(),
+                "points": pt,
+                "credits": cr,
+            })
 
-    sems = sorted(grades_map.keys())
+    # ---- Pick the included attempt per course (highest grade; tie -> most recent) ----
+    included_attempt_key_by_code: Dict[str, tuple] = {}
+    best_points_by_code: Dict[str, float] = {}
+
+    for a in attempts:
+        code = a["code_norm"]
+        pt = a["points"]
+        if not code or pt is None:
+            continue
+
+        if code not in best_points_by_code:
+            best_points_by_code[code] = pt
+            included_attempt_key_by_code[code] = a["attempt_key"]
+            continue
+
+        best_pt = best_points_by_code[code]
+        best_key = included_attempt_key_by_code[code]
+        if (pt > best_pt) or (pt == best_pt and a["attempt_key"] > best_key):
+            best_points_by_code[code] = pt
+            included_attempt_key_by_code[code] = a["attempt_key"]
+
+    # ---- Compute term GPA (after repeat exclusions) and cumulative GPA ----
+    total_points = 0.0
+    total_credits = 0
+
     for sem in sems:
         sem_points = 0.0
         sem_credits = 0
 
         lines.append(f"\n🗓 <b>{sem}</b>")
-        for code, grade in sorted((grades_map.get(sem) or {}).items()):
-            cr = get_course_credits(code)
-            pt = grade_to_points(grade)
-            gtxt = grade if grade else "—"
-            lines.append(f"  • {code} ({cr} cr): {gtxt}")
 
-            if grade:
+        term_attempts = [a for a in attempts if a["sem"] == sem]
+        term_attempts.sort(key=lambda x: x["code_norm"])  # show in code order
+
+        for a in term_attempts:
+            code_disp = a["code_raw"]
+            grade_disp = a["grade_raw"] or "—"
+            cr = a["credits"]
+            pt = a["points"]
+
+            # No grade / not in GPA (no numeric equivalent)
+            if pt is None:
+                lines.append(f"  • {code_disp} ({cr} cr): {grade_disp} ⏭")
+                continue
+
+            # Defensive: unknown grade token -> not in GPA
+            if _norm_grade(grade_disp) not in GRADE_POINTS:
+                lines.append(f"  • {code_disp} ({cr} cr): {grade_disp} ⏭")
+                continue
+
+            # 0-credit courses do not affect GPA.
+            if cr <= 0:
+                lines.append(f"  • {code_disp} ({cr} cr): {grade_disp} ⏭")
+                continue
+
+            included = included_attempt_key_by_code.get(a["code_norm"]) == a["attempt_key"]
+            tag = "" if included else "🚫"
+            lines.append(f"  • {code_disp} ({cr} cr): {grade_disp} {tag}")
+
+            if included:
                 sem_points += pt * cr
                 sem_credits += cr
-
-                # Use the best attempt for cumulative GPA.
-                if code not in best_pts_by_code or pt > best_pts_by_code[code]:
-                    best_pts_by_code[code] = pt
-                    credits_by_code[code] = cr
+                total_points += pt * cr
+                total_credits += cr
 
         sem_gpa = (sem_points / sem_credits) if sem_credits > 0 else 0.0
-        lines.append(f"  ➤ Closed credits: {sem_credits} | GPA: {sem_gpa:.3f}")
+        lines.append(f"  ➤ Counted credits: {sem_credits} | GPA: {sem_gpa:.2f}")
 
-    for code, pt in best_pts_by_code.items():
-        cr = credits_by_code.get(code, 0)
-        total_best_points += pt * cr
-        total_best_credits += cr
-
-    cum_gpa = (total_best_points / total_best_credits) if total_best_credits > 0 else 0.0
-    lines.append(f"\n🔢 Total closed credits: {total_best_credits}")
-    lines.append(f"🏁 Cumulative GPA: {cum_gpa:.3f}")
+    cum_gpa = (total_points / total_credits) if total_credits > 0 else 0.0
+    lines.append(f"\n🔢 Total counted credits: <b>{total_credits}</b>")
+    lines.append(f"🏁 Cumulative GPA: <b>{cum_gpa:.2f}</b>")
 
     return "\n".join(lines)
 
