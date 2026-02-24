@@ -186,7 +186,6 @@ def format_gpa_report_compact(grades_map: Dict[str, Dict[str, str]]) -> str:
     lines: List[str] = [
         "<b>📊 GPA Calculation</b>",
         "Legend: ",
-        " • ✅ counted ",
         " • 🚫 excluded (repeat) ",
         " • ⏭ not in GPA",
     ]
