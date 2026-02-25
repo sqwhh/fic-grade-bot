@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+._*
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local DB / runtime data
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Python cache / tooling cache
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# venv
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+logs/
+
+# Playwright
+ms-playwright/
+playwright-report/
+test-results/
